@@ -1,0 +1,40 @@
+{
+  "name": "claude-dashboard",
+  "version": "1.0.0",
+  "description": "A zero-dependency visual dashboard for your Claude Code setup (~/.claude/)",
+  "main": "dashboard.js",
+  "bin": {
+    "claude-dashboard": "./dashboard.js"
+  },
+  "scripts": {
+    "start": "node dashboard.js",
+    "serve": "node dashboard.js --serve"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "dashboard",
+    "cli",
+    "developer-tools",
+    "anthropic"
+  ],
+  "author": "Yash Patel",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dashboard.js",
+    "install.sh",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/drippingfrog/claude-dashboard"
+  },
+  "homepage": "https://github.com/drippingfrog/claude-dashboard#readme",
+  "bugs": {
+    "url": "https://github.com/drippingfrog/claude-dashboard/issues"
+  }
+}
