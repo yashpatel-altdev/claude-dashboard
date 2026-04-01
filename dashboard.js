@@ -33,6 +33,26 @@ function listDir(dirPath) {
   } catch { return []; }
 }
 
+// Parse YAML-style frontmatter from a markdown file.
+// Returns { meta: { key: value, ... }, body: '...' }
+function parseFrontmatter(content) {
+  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
+  if (!match) return { meta: {}, body: content.trim() };
+  const meta = {};
+  for (const line of match[1].split('\n')) {
+    const kv = line.match(/^(\w+):\s*(.*)$/);
+    if (kv) meta[kv[1].trim()] = kv[2].trim();
+  }
+  return { meta, body: match[2].trim() };
+}
+
+// Extract a one-sentence summary from markdown body (first non-heading paragraph).
+function extractSummary(body) {
+  const lines = body.split('\n');
+  const para = lines.find(l => l.trim() && !l.startsWith('#') && !l.startsWith('>') && !l.startsWith('|') && !l.startsWith('-') && !l.startsWith('*') && !l.startsWith('`'));
+  return (para || '').trim().replace(/\*\*/g, '').slice(0, 160);
+}
+
 function collectRules() {
   const rulesDir = path.join(CLAUDE_DIR, 'rules');
   const cats = listDir(rulesDir).filter(e => e.isDir);
@@ -41,7 +61,10 @@ function collectRules() {
     result[cat.name] = {};
     const files = listDir(cat.full).filter(e => !e.isDir && e.name.endsWith('.md'));
     for (const f of files) {
-      result[cat.name][f.name] = { content: readFile(f.full) || '', filePath: f.full };
+      const raw = readFile(f.full) || '';
+      const { meta, body } = parseFrontmatter(raw);
+      const summary = meta.description || extractSummary(body);
+      result[cat.name][f.name] = { content: raw, body, meta, summary, filePath: f.full };
     }
   }
   return result;
@@ -52,42 +75,44 @@ function collectAgents() {
     'everything-claude-code', 'everything-claude-code', '1.8.0', 'agents');
   const files = listDir(agentsDir).filter(e => !e.isDir && e.name.endsWith('.md'));
   return files.map(f => {
-    const content = readFile(f.full) || '';
-    const firstLine = content.split('\n').find(l => l.trim() && !l.startsWith('#')) || '';
-    const title = content.match(/^#\s+(.+)$/m)?.[1] || f.name.replace('.md', '');
-    return { name: f.name.replace('.md', ''), title, description: firstLine.trim(), content, filePath: f.full };
+    const raw = readFile(f.full) || '';
+    const { meta, body } = parseFrontmatter(raw);
+    const title = raw.match(/^#\s+(.+)$/m)?.[1] || f.name.replace('.md', '');
+    const description = meta.description || extractSummary(body);
+    return { name: f.name.replace('.md', ''), title, description, meta, body, content: raw, filePath: f.full };
   });
 }
 
 function collectCommands() {
   const cmdsDir = path.join(CLAUDE_DIR, 'plugins', 'cache',
     'everything-claude-code', 'everything-claude-code', '1.8.0', 'commands');
-  // Also include user commands from ~/.claude/commands/
   const userCmdsDir = path.join(CLAUDE_DIR, 'commands');
   const pluginFiles = listDir(cmdsDir).filter(e => !e.isDir && e.name.endsWith('.md'));
   const userFiles = listDir(userCmdsDir).filter(e => !e.isDir && e.name.endsWith('.md'));
   return [...pluginFiles, ...userFiles].map(f => {
-    const content = readFile(f.full) || '';
-    const title = content.match(/^#\s+(.+)$/m)?.[1] || f.name.replace('.md', '');
-    const desc = content.split('\n').slice(0, 10).find(l => l.trim() && !l.startsWith('#')) || '';
+    const raw = readFile(f.full) || '';
+    const { meta, body } = parseFrontmatter(raw);
+    const title = raw.match(/^#\s+(.+)$/m)?.[1] || f.name.replace('.md', '');
+    const description = meta.description || extractSummary(body);
     const isUser = f.full.startsWith(userCmdsDir);
-    return { name: f.name.replace('.md', ''), title, description: desc.trim(), content, filePath: f.full, isUser };
+    return { name: f.name.replace('.md', ''), title, description, meta, body, content: raw, filePath: f.full, isUser };
   });
 }
 
 function collectSkills() {
   const skillsBase = path.join(CLAUDE_DIR, 'plugins', 'marketplaces',
     'everything-claude-code', '.agents', 'skills');
-  // Also check user skills
   const userSkillsBase = path.join(CLAUDE_DIR, 'skills', 'learned');
   const skillDirs = listDir(skillsBase).filter(e => e.isDir);
   const userSkillDirs = listDir(userSkillsBase).filter(e => e.isDir);
   return [...skillDirs.map(d => ({ ...d, isUser: false })), ...userSkillDirs.map(d => ({ ...d, isUser: true }))].map(d => {
     const skillFile = path.join(d.full, 'SKILL.md');
-    const content = readFile(skillFile) || '';
-    const title = content.match(/^#\s+(.+)$/m)?.[1] || d.name;
-    const desc = content.split('\n').slice(0, 15).find(l => l.trim() && !l.startsWith('#') && !l.startsWith('>')) || '';
-    return { name: d.name, title, description: desc.trim(), content, filePath: skillFile, isUser: d.isUser };
+    const raw = readFile(skillFile) || '';
+    const { meta, body } = parseFrontmatter(raw);
+    const title = raw.match(/^#\s+(.+)$/m)?.[1] || d.name;
+    const description = meta.description || extractSummary(body);
+    const origin = meta.origin || (d.isUser ? 'user' : 'ECC');
+    return { name: d.name, title, description, origin, meta, body, content: raw, filePath: skillFile, isUser: d.isUser };
   });
 }
 
@@ -103,7 +128,16 @@ function collectMemory() {
   const files = listDir(memDir).filter(e => !e.isDir && e.name.endsWith('.md'));
   const result = {};
   for (const f of files) {
-    result[f.name] = { content: readFile(f.full) || '', filePath: f.full };
+    const raw = readFile(f.full) || '';
+    const { meta, body } = parseFrontmatter(raw);
+    result[f.name] = {
+      content: raw,
+      body,
+      name: meta.name || f.name.replace('.md', ''),
+      description: meta.description || '',
+      type: meta.type || 'other',
+      filePath: f.full,
+    };
   }
   return result;
 }
@@ -164,12 +198,38 @@ function collectProjects() {
   const projects = listDir(hDir).filter(e => e.isDir);
   return projects.map(p => {
     const info = readJSON(path.join(p.full, 'project.json')) || { name: p.name, root: 'unknown' };
-    const instinctsDir = path.join(p.full, 'instincts', 'personal');
-    const instincts = listDir(instinctsDir).filter(e => !e.isDir && e.name.endsWith('.md'));
+
+    // Personal instincts
+    const personalDir = path.join(p.full, 'instincts', 'personal');
+    const personalInstincts = listDir(personalDir)
+      .filter(e => !e.isDir && e.name.endsWith('.md'))
+      .map(e => {
+        const raw = readFile(e.full) || '';
+        const { meta, body } = parseFrontmatter(raw);
+        return { name: meta.name || e.name.replace('.md', ''), summary: extractSummary(body), filePath: e.full };
+      });
+
+    // Inherited instincts
     const inheritedDir = path.join(p.full, 'instincts', 'inherited');
-    const inherited = listDir(inheritedDir).filter(e => !e.isDir && e.name.endsWith('.md'));
-    const obsRaw = readFile(path.join(p.full, 'observations.jsonl'));
-    const obsCount = obsRaw ? obsRaw.split('\n').filter(Boolean).length : 0;
+    const inheritedInstincts = listDir(inheritedDir)
+      .filter(e => !e.isDir && e.name.endsWith('.md'))
+      .map(e => e.name.replace('.md', ''));
+
+    // Evolved agents/commands/skills
+    const evolvedAgents   = listDir(path.join(p.full, 'evolved', 'agents')).filter(e => !e.isDir && e.name.endsWith('.md')).map(e => e.name.replace('.md', ''));
+    const evolvedCommands = listDir(path.join(p.full, 'evolved', 'commands')).filter(e => !e.isDir && e.name.endsWith('.md')).map(e => e.name.replace('.md', ''));
+    const evolvedSkills   = listDir(path.join(p.full, 'evolved', 'skills')).filter(e => !e.isDir && e.name.endsWith('.md')).map(e => e.name.replace('.md', ''));
+
+    // Observations: count + last 3 tool names
+    const obsRaw = readFile(path.join(p.full, 'observations.jsonl')) || '';
+    const obsLines = obsRaw.split('\n').filter(Boolean);
+    const recentObs = obsLines.slice(-3).map(line => {
+      try {
+        const j = JSON.parse(line);
+        return j.tool || j.event || j.type || '?';
+      } catch { return '?'; }
+    }).filter(t => t !== '?');
+
     return {
       id: p.name,
       name: info.name || p.name,
@@ -177,18 +237,53 @@ function collectProjects() {
       remote: info.remote || '',
       createdAt: info.created_at || '',
       lastSeen: info.last_seen || '',
-      instinctCount: instincts.length,
-      inheritedCount: inherited.length,
-      observationCount: obsCount,
+      observationCount: obsLines.length,
+      recentObs,
+      personalInstincts,
+      inheritedInstincts,
+      evolvedAgents,
+      evolvedCommands,
+      evolvedSkills,
     };
   });
 }
 
 function collectSettings() {
-  return {
-    global: readJSON(path.join(CLAUDE_DIR, 'settings.json')) || {},
-    local: readJSON(path.join(CLAUDE_DIR, 'settings.local.json')) || {},
-  };
+  const global = readJSON(path.join(CLAUDE_DIR, 'settings.json')) || {};
+  const raw    = readJSON(path.join(CLAUDE_DIR, 'settings.local.json')) || {};
+
+  // Flatten nested permissions.allow into categorised lists
+  const allAllowed = raw?.permissions?.allow || [];
+  const allowedBash = allAllowed
+    .filter(t => typeof t === 'string' && t.startsWith('Bash('))
+    .map(t => t.replace(/^Bash\(/, '').replace(/\)$/, ''));
+  const allowedMcp = allAllowed
+    .filter(t => typeof t === 'string' && !t.startsWith('Bash('));
+
+  return { global, allowedBash, allowedMcp };
+}
+
+// Extract key principles from rules/common/ as a live "philosophy" summary
+function collectPhilosophy() {
+  const files = ['coding-style.md', 'testing.md', 'security.md', 'performance.md', 'development-workflow.md'];
+  const rulesDir = path.join(CLAUDE_DIR, 'rules', 'common');
+  const principles = [];
+  for (const fname of files) {
+    const raw = readFile(path.join(rulesDir, fname));
+    if (!raw) continue;
+    const { body } = parseFrontmatter(raw);
+    // Grab the first sentence under each ## heading
+    const sections = body.split(/^##\s+/m).slice(1);
+    for (const section of sections.slice(0, 2)) {
+      const lines = section.split('\n');
+      const heading = lines[0].trim();
+      const summary = lines.slice(1).find(l => l.trim() && !l.startsWith('#') && !l.startsWith('`') && !l.startsWith('|') && !l.startsWith('-'));
+      if (heading && summary) {
+        principles.push({ rule: fname.replace('.md', ''), heading, summary: summary.trim().replace(/\*\*/g, '').slice(0, 120) });
+      }
+    }
+  }
+  return principles;
 }
 
 function collectStats() {
@@ -218,7 +313,7 @@ function escapeJSON(obj) {
 function generateHTML(data) {
   const {
     settings, rules, agents, commands, skills, hooks,
-    memory, projects, stats, fileStructure
+    memory, projects, stats, fileStructure, philosophy
   } = data;
 
   const ruleCategories = Object.keys(rules);
@@ -499,18 +594,17 @@ function generateHTML(data) {
           </div>
         </div>
 
-        <!-- Development Philosophy -->
+        <!-- Development Philosophy — live from rules/common/ -->
         <div class="card p-5">
-          <h2 class="font-semibold text-slate-700 mb-3">🎯 Development Philosophy</h2>
+          <h2 class="font-semibold text-slate-700 mb-1">🎯 Active Coding Standards</h2>
+          <p class="text-xs text-slate-400 mb-3">Live — extracted from your <code>rules/common/</code> files</p>
           <div class="space-y-2 text-sm">
-            ${[
-              ['🔒 Immutability', 'MANDATORY — always create new objects'],
-              ['🧪 TDD', 'Write tests first — RED → GREEN → IMPROVE'],
-              ['📊 Coverage', '80% minimum required'],
-              ['🔍 Research First', 'GitHub → Context7 → Exa'],
-              ['📁 File Size', '200–400 lines typical, 800 max'],
-            ].map(([label, desc]) => `
-            <div class="flex gap-2"><span class="font-medium text-slate-700 shrink-0">${label}</span><span class="text-slate-500">${escapeHTML(desc)}</span></div>`).join('')}
+            ${philosophy.slice(0, 8).map(p => `
+            <div class="flex gap-2 items-start">
+              <span class="tag bg-slate-100 text-slate-500 shrink-0 mt-0.5">${escapeHTML(p.rule)}</span>
+              <div><span class="font-medium text-slate-700">${escapeHTML(p.heading)}</span> — <span class="text-slate-500">${escapeHTML(p.summary)}</span></div>
+            </div>`).join('')}
+            ${philosophy.length === 0 ? '<p class="text-slate-400 text-xs">No rules found in ~/.claude/rules/common/</p>' : ''}
           </div>
         </div>
       </div>
@@ -581,18 +675,28 @@ function generateHTML(data) {
           <pre class="bg-slate-900 text-green-300 p-4 rounded-lg text-xs overflow-x-auto">${escapeHTML(JSON.stringify(settings.global, null, 2))}</pre>
         </div>
         <div class="card p-5">
-          <h2 class="font-semibold text-slate-700 mb-3">settings.local.json — Permissions Allowlist</h2>
-          ${Object.keys(settings.local).length > 0 ? `
-          <div class="space-y-3">
-            ${Object.entries(settings.local).map(([key, val]) => `
+          <h2 class="font-semibold text-slate-700 mb-1">settings.local.json — Auto-approved Permissions</h2>
+          <p class="text-xs text-slate-400 mb-4">These tools run without asking for your approval</p>
+          ${settings.allowedBash.length + settings.allowedMcp.length === 0
+            ? '<p class="text-sm text-slate-400">No permissions configured</p>'
+            : `<div class="space-y-4">
             <div>
-              <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">${escapeHTML(key)}</div>
-              ${Array.isArray(val) ? `
+              <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Bash Commands (${settings.allowedBash.length})</div>
+              <div class="space-y-1">
+                ${settings.allowedBash.map(cmd => `
+                <div class="flex items-start gap-2 text-xs">
+                  <span class="tag bg-amber-50 text-amber-700 shrink-0 mt-0.5">bash</span>
+                  <code class="text-slate-600 break-all">${escapeHTML(cmd)}</code>
+                </div>`).join('')}
+              </div>
+            </div>
+            <div>
+              <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">MCP Tools (${settings.allowedMcp.length})</div>
               <div class="flex flex-wrap gap-1">
-                ${val.map(v => `<span class="tag bg-slate-100 text-slate-700">${escapeHTML(String(v))}</span>`).join('')}
-              </div>` : `<span class="text-sm text-slate-700">${escapeHTML(String(val))}</span>`}
-            </div>`).join('')}
-          </div>` : '<p class="text-sm text-slate-400">No local settings configured</p>'}
+                ${settings.allowedMcp.map(t => `<span class="tag bg-blue-50 text-blue-700">${escapeHTML(t)}</span>`).join('')}
+              </div>
+            </div>
+          </div>`}
         </div>
       </div>
     </div>
@@ -699,19 +803,25 @@ function generateHTML(data) {
       <input x-model="search" placeholder="Search agents..." class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm mb-4 outline-none focus:border-claude-400" />
 
       <div class="flex gap-4">
-        <div class="w-52 shrink-0 space-y-1">
+        <div class="w-56 shrink-0 space-y-1 max-h-[65vh] overflow-y-auto">
           <template x-for="a in filteredAgents" :key="a.name">
             <button
               @click="activeAgent = a.name"
-              :class="['w-full text-left px-3 py-2 rounded-lg text-sm transition-all', activeAgent === a.name ? 'bg-blue-100 text-blue-700 font-medium' : 'text-slate-600 hover:bg-slate-100']"
-              x-text="a.name"
-            ></button>
+              :class="['w-full text-left px-3 py-2 rounded-lg transition-all', activeAgent === a.name ? 'bg-blue-100 text-blue-700' : 'text-slate-600 hover:bg-slate-100']"
+            >
+              <div class="text-sm font-medium" x-text="a.name"></div>
+              <div class="text-xs text-slate-400 truncate mt-0.5" x-text="a.description" style="max-width:180px"></div>
+            </button>
           </template>
         </div>
-        <div class="flex-1 card p-5 min-h-64">
+        <div class="flex-1 card p-5 min-h-64 overflow-y-auto max-h-[75vh]">
           <div x-show="!activeAgent" class="flex items-center justify-center h-40 text-slate-400 text-sm">← Select an agent</div>
           ${agents.map(a => `
           <div x-show="activeAgent === '${a.name}'">
+            <div class="bg-blue-50 border border-blue-100 rounded-lg p-3 mb-4">
+              <div class="font-semibold text-blue-800 mb-1">${escapeHTML(a.title)}</div>
+              <p class="text-sm text-blue-700">${escapeHTML(a.description)}</p>
+            </div>
             <div class="flex items-center gap-2 mb-3 pb-3 border-b border-slate-100">
               <span class="path-pill" @click="copyPath('${escapeHTML(a.filePath)}')">
                 <span class="path-text">${escapeHTML(a.filePath)}</span>
@@ -719,7 +829,7 @@ function generateHTML(data) {
                 <span x-show="copied !== '${escapeHTML(a.filePath)}'" class="opacity-40">⎘</span>
               </span>
             </div>
-            <div class="prose-custom" x-html="renderMarkdown(${escapeJSON(a.content)})"></div>
+            <div class="prose-custom" x-html="renderMarkdown(${escapeJSON(a.body || a.content)})"></div>
           </div>`).join('')}
         </div>
       </div>
@@ -739,21 +849,25 @@ function generateHTML(data) {
       <input x-model="search" placeholder="Search commands..." class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm mb-4 outline-none focus:border-claude-400" />
 
       <div class="flex gap-4">
-        <div class="w-52 shrink-0 space-y-1 max-h-[65vh] overflow-y-auto">
+        <div class="w-56 shrink-0 space-y-1 max-h-[65vh] overflow-y-auto">
           <template x-for="c in filteredCommands" :key="c.name">
             <button
               @click="activeCommand = c.name"
-              :class="['w-full text-left px-3 py-2 rounded-lg text-sm transition-all', activeCommand === c.name ? 'bg-indigo-100 text-indigo-700 font-medium' : 'text-slate-600 hover:bg-slate-100']"
+              :class="['w-full text-left px-3 py-2 rounded-lg transition-all', activeCommand === c.name ? 'bg-indigo-100 text-indigo-700' : 'text-slate-600 hover:bg-slate-100']"
             >
-              <span class="text-slate-400">/</span><span x-text="c.name"></span>
-              <span x-show="c.isUser" class="tag bg-emerald-100 text-emerald-600 ml-1">user</span>
+              <div class="text-sm font-medium"><span class="opacity-50">/</span><span x-text="c.name"></span><span x-show="c.isUser" class="tag bg-emerald-100 text-emerald-600 ml-1 text-xs">user</span></div>
+              <div class="text-xs text-slate-400 truncate mt-0.5" x-text="c.description" style="max-width:180px"></div>
             </button>
           </template>
         </div>
-        <div class="flex-1 card p-5 min-h-64">
+        <div class="flex-1 card p-5 min-h-64 overflow-y-auto max-h-[75vh]">
           <div x-show="!activeCommand" class="flex items-center justify-center h-40 text-slate-400 text-sm">← Select a command</div>
           ${commands.map(c => `
           <div x-show="activeCommand === '${c.name}'">
+            <div class="bg-indigo-50 border border-indigo-100 rounded-lg p-3 mb-4">
+              <div class="font-semibold text-indigo-800 mb-1">/<span>${escapeHTML(c.name)}</span></div>
+              <p class="text-sm text-indigo-700">${escapeHTML(c.description || 'No description available')}</p>
+            </div>
             <div class="flex items-center gap-2 mb-3 pb-3 border-b border-slate-100 flex-wrap">
               <span class="path-pill" @click="copyPath('${escapeHTML(c.filePath)}')">
                 <span class="path-text">${escapeHTML(c.filePath)}</span>
@@ -762,7 +876,7 @@ function generateHTML(data) {
               </span>
               ${c.isUser ? '<span class="tag bg-emerald-100 text-emerald-700">user-defined</span>' : '<span class="tag bg-slate-100 text-slate-500">plugin</span>'}
             </div>
-            <div class="prose-custom" x-html="renderMarkdown(${escapeJSON(c.content)})"></div>
+            <div class="prose-custom" x-html="renderMarkdown(${escapeJSON(c.body || c.content)})"></div>
           </div>`).join('')}
         </div>
       </div>
@@ -782,30 +896,37 @@ function generateHTML(data) {
       <input x-model="search" placeholder="Search skills..." class="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm mb-4 outline-none focus:border-claude-400" />
 
       <div class="flex gap-4">
-        <div class="w-52 shrink-0 space-y-1 max-h-[65vh] overflow-y-auto">
+        <div class="w-56 shrink-0 space-y-1 max-h-[65vh] overflow-y-auto">
           <template x-for="s in filteredSkills" :key="s.name">
             <button
               @click="activeSkill = s.name"
-              :class="['w-full text-left px-3 py-2 rounded-lg text-sm transition-all', activeSkill === s.name ? 'bg-emerald-100 text-emerald-700 font-medium' : 'text-slate-600 hover:bg-slate-100']"
+              :class="['w-full text-left px-3 py-2 rounded-lg transition-all', activeSkill === s.name ? 'bg-emerald-100 text-emerald-700' : 'text-slate-600 hover:bg-slate-100']"
             >
-              <span x-text="s.name"></span>
-              <span x-show="s.isUser" class="tag bg-blue-100 text-blue-600 ml-1">user</span>
+              <div class="text-sm font-medium flex items-center gap-1"><span x-text="s.name"></span><span x-show="s.isUser" class="tag bg-blue-100 text-blue-600 text-xs">user</span></div>
+              <div class="text-xs text-slate-400 truncate mt-0.5" x-text="s.description" style="max-width:180px"></div>
             </button>
           </template>
         </div>
-        <div class="flex-1 card p-5 min-h-64">
+        <div class="flex-1 card p-5 min-h-64 overflow-y-auto max-h-[75vh]">
           <div x-show="!activeSkill" class="flex items-center justify-center h-40 text-slate-400 text-sm">← Select a skill</div>
           ${skills.map(s => `
           <div x-show="activeSkill === '${s.name}'">
+            <div class="bg-emerald-50 border border-emerald-100 rounded-lg p-3 mb-4">
+              <div class="flex items-center gap-2 mb-1">
+                <span class="font-semibold text-emerald-800">${escapeHTML(s.title)}</span>
+                <span class="tag bg-emerald-100 text-emerald-700">${escapeHTML(s.origin)}</span>
+                ${s.isUser ? '<span class="tag bg-blue-100 text-blue-700">user-learned</span>' : ''}
+              </div>
+              <p class="text-sm text-emerald-700">${escapeHTML(s.description || 'No description available')}</p>
+            </div>
             <div class="flex items-center gap-2 mb-3 pb-3 border-b border-slate-100 flex-wrap">
               <span class="path-pill" @click="copyPath('${escapeHTML(s.filePath)}')">
                 <span class="path-text">${escapeHTML(s.filePath)}</span>
                 <span x-show="copied === '${escapeHTML(s.filePath)}'" class="text-green-500">✓</span>
                 <span x-show="copied !== '${escapeHTML(s.filePath)}'" class="opacity-40">⎘</span>
               </span>
-              ${s.isUser ? '<span class="tag bg-blue-100 text-blue-700">user-learned</span>' : '<span class="tag bg-slate-100 text-slate-500">plugin</span>'}
             </div>
-            <div class="prose-custom" x-html="renderMarkdown(${escapeJSON(s.content)})"></div>
+            <div class="prose-custom" x-html="renderMarkdown(${escapeJSON(s.body || s.content)})"></div>
           </div>`).join('')}
         </div>
       </div>
@@ -820,28 +941,35 @@ function generateHTML(data) {
         <p class="mt-1">📍 Files at: <span class="font-mono text-xs cursor-pointer hover:text-claude-600" @click="copyPath('${escapeHTML(path.join(CLAUDE_DIR, 'projects', '-Users-drippingfrog', 'memory'))}')">~/.claude/projects/-Users-drippingfrog/memory/</span></p>
       </div>
 
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div class="space-y-4">
         ${Object.entries(memory).map(([file, entry]) => {
           const isIndex = file === 'MEMORY.md';
-          const { content, filePath } = entry;
+          const typeColors = { user:'bg-blue-100 text-blue-700', feedback:'bg-amber-100 text-amber-700', project:'bg-green-100 text-green-700', reference:'bg-purple-100 text-purple-700', other:'bg-slate-100 text-slate-600' };
+          const typeColor = typeColors[entry.type] || typeColors.other;
           return `
-        <div class="card p-4 ${isIndex ? 'md:col-span-3' : ''} hover:border-claude-300 transition-colors">
-          <div class="flex items-start justify-between gap-2 mb-2">
-            <div class="font-medium text-slate-700 text-sm cursor-pointer" @click="activeMemoryFile = activeMemoryFile === '${file}' ? null : '${file}'">${isIndex ? '📑 Memory Index' : escapeHTML(file.replace('.md', ''))}</div>
-            ${isIndex ? '' : `<span class="tag" :class="memoryTypeColor(${escapeJSON(content)})" x-text="memoryTypeName(${escapeJSON(content)})"></span>`}
+        <div class="card overflow-hidden">
+          <div class="px-5 py-3 bg-slate-50 border-b border-slate-100 flex items-center justify-between gap-3 cursor-pointer" @click="activeMemoryFile = activeMemoryFile === '${file}' ? null : '${file}'">
+            <div class="flex items-center gap-2">
+              ${isIndex ? '<span class="text-base">📑</span>' : `<span class="tag ${typeColor}">${escapeHTML(entry.type)}</span>`}
+              <span class="font-semibold text-slate-700">${escapeHTML(isIndex ? 'Memory Index' : entry.name)}</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <span class="path-pill" @click.stop="copyPath('${escapeHTML(entry.filePath)}')">
+                <span class="path-text">${escapeHTML(entry.filePath)}</span>
+                <span x-show="copied === '${escapeHTML(entry.filePath)}'" class="text-green-500">✓</span>
+                <span x-show="copied !== '${escapeHTML(entry.filePath)}'" class="opacity-40">⎘</span>
+              </span>
+              <span class="text-slate-400 text-sm" x-text="activeMemoryFile === '${file}' ? '▲' : '▼'"></span>
+            </div>
           </div>
-          <div class="mb-2">
-            <span class="path-pill" @click="copyPath('${escapeHTML(filePath)}')">
-              <span class="path-text">${escapeHTML(filePath)}</span>
-              <span x-show="copied === '${escapeHTML(filePath)}'" class="text-green-500">✓</span>
-              <span x-show="copied !== '${escapeHTML(filePath)}'" class="opacity-40">⎘</span>
-            </span>
+          ${!isIndex && entry.description ? `<div class="px-5 py-2 bg-white border-b border-slate-100 text-sm text-slate-500 italic">${escapeHTML(entry.description)}</div>` : ''}
+          <div x-show="activeMemoryFile === '${file}'" class="px-5 py-4">
+            <div class="prose-custom" x-html="renderMarkdown(${escapeJSON(entry.body || entry.content)})"></div>
           </div>
-          ${isIndex ? `<p class="text-xs text-slate-400 cursor-pointer" @click="activeMemoryFile = activeMemoryFile === '${file}' ? null : '${file}'">Click to view the memory index</p>` :
-            `<p class="text-xs text-slate-500 line-clamp-2 cursor-pointer" @click="activeMemoryFile = activeMemoryFile === '${file}' ? null : '${file}'">${escapeHTML(content.replace(/^---[\s\S]*?---\n*/m, '').trim().slice(0, 120))}...</p>`}
-          <div x-show="activeMemoryFile === '${file}'" class="mt-3 pt-3 border-t border-slate-100">
-            <div class="prose-custom" x-html="renderMarkdown(${escapeJSON(content)})"></div>
-          </div>
+          ${isIndex ? '' : `
+          <div x-show="activeMemoryFile !== '${file}'" class="px-5 py-3">
+            <p class="text-sm text-slate-500">${escapeHTML((entry.body || '').slice(0, 200))}${(entry.body || '').length > 200 ? '…' : ''}</p>
+          </div>`}
         </div>`;
         }).join('')}
       </div>
@@ -856,35 +984,71 @@ function generateHTML(data) {
         <p class="mt-1">📍 Files at: <span class="font-mono text-xs cursor-pointer hover:text-claude-600" @click="copyPath('${escapeHTML(path.join(CLAUDE_DIR, 'homunculus', 'projects'))}')">~/.claude/homunculus/projects/</span></p>
       </div>
 
-      <div class="space-y-3">
+      <div class="space-y-4">
         ${projects.map(p => `
-        <div class="card p-5">
-          <div class="flex items-start justify-between gap-4">
-            <div class="flex-1 min-w-0">
-              <div class="flex items-center gap-2 mb-1">
-                <span class="font-semibold text-slate-800">${escapeHTML(p.name)}</span>
-                <span class="tag bg-slate-100 text-slate-500 font-mono text-xs">${escapeHTML(p.id)}</span>
+        <div class="card overflow-hidden">
+          <!-- Header -->
+          <div class="px-5 py-4 bg-slate-50 border-b border-slate-100">
+            <div class="flex items-start justify-between gap-4 flex-wrap">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 mb-1 flex-wrap">
+                  <span class="font-bold text-slate-800 text-lg">${escapeHTML(p.name)}</span>
+                  <span class="tag bg-slate-100 text-slate-500 font-mono">${escapeHTML(p.id)}</span>
+                </div>
+                <div class="flex items-center gap-1 text-sm text-slate-500 mb-1">
+                  <span>📁</span>
+                  <span class="font-mono truncate">${escapeHTML(p.root)}</span>
+                </div>
+                ${p.remote ? `<div class="flex items-center gap-1 text-xs text-blue-500"><span>🔗</span><span class="truncate">${escapeHTML(p.remote)}</span></div>` : '<div class="text-xs text-slate-400">No remote configured</div>'}
               </div>
-              <div class="text-sm text-slate-500 truncate mb-2">${escapeHTML(p.root)}</div>
-              ${p.remote ? `<div class="text-xs text-blue-500 truncate mb-2">${escapeHTML(p.remote)}</div>` : ''}
-              <div class="flex gap-3 flex-wrap text-xs">
-                <span class="text-slate-400">Created: <span class="text-slate-600">${new Date(p.createdAt).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}</span></span>
-                <span class="text-slate-400">Last seen: <span class="text-slate-600">${new Date(p.lastSeen).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}</span></span>
+              <div class="flex gap-4 shrink-0 text-center">
+                <div><div class="text-2xl font-bold text-green-600">${p.observationCount}</div><div class="text-xs text-slate-400">observations</div></div>
+                <div><div class="text-2xl font-bold text-purple-600">${p.personalInstincts.length}</div><div class="text-xs text-slate-400">instincts</div></div>
+                <div><div class="text-2xl font-bold text-blue-500">${p.inheritedInstincts.length}</div><div class="text-xs text-slate-400">inherited</div></div>
               </div>
             </div>
-            <div class="flex gap-3 shrink-0 text-center">
+            <div class="flex gap-4 mt-3 text-xs text-slate-400 flex-wrap">
+              <span>Created <strong class="text-slate-600">${new Date(p.createdAt).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}</strong></span>
+              <span>Last seen <strong class="text-slate-600">${new Date(p.lastSeen).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' })}</strong></span>
+            </div>
+          </div>
+
+          <!-- Body -->
+          <div class="px-5 py-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+
+            <!-- Personal Instincts -->
+            <div>
+              <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Personal Instincts (${p.personalInstincts.length})</div>
+              ${p.personalInstincts.length === 0
+                ? '<p class="text-xs text-slate-400">None yet — Claude learns instincts as you work</p>'
+                : `<div class="space-y-1">${p.personalInstincts.map(i => `
+                <div class="text-xs bg-purple-50 border border-purple-100 rounded px-2 py-1">
+                  <div class="font-medium text-purple-700">${escapeHTML(i.name)}</div>
+                  ${i.summary ? `<div class="text-purple-500 mt-0.5">${escapeHTML(i.summary)}</div>` : ''}
+                </div>`).join('')}</div>`}
+            </div>
+
+            <!-- Evolved + Inherited -->
+            <div class="space-y-3">
+              ${p.evolvedAgents.length + p.evolvedCommands.length + p.evolvedSkills.length > 0 ? `
               <div>
-                <div class="text-2xl font-bold text-purple-600">${p.instinctCount}</div>
-                <div class="text-xs text-slate-400">instincts</div>
-              </div>
+                <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Evolved Components</div>
+                ${p.evolvedAgents.length ? `<div class="mb-1"><span class="text-xs font-medium text-slate-600">Agents: </span>${p.evolvedAgents.map(a => `<span class="tag bg-blue-50 text-blue-600 mr-1">${escapeHTML(a)}</span>`).join('')}</div>` : ''}
+                ${p.evolvedCommands.length ? `<div class="mb-1"><span class="text-xs font-medium text-slate-600">Commands: </span>${p.evolvedCommands.map(c => `<span class="tag bg-indigo-50 text-indigo-600 mr-1">${escapeHTML(c)}</span>`).join('')}</div>` : ''}
+                ${p.evolvedSkills.length ? `<div><span class="text-xs font-medium text-slate-600">Skills: </span>${p.evolvedSkills.map(s => `<span class="tag bg-emerald-50 text-emerald-600 mr-1">${escapeHTML(s)}</span>`).join('')}</div>` : ''}
+              </div>` : ''}
+
+              ${p.inheritedInstincts.length > 0 ? `
               <div>
-                <div class="text-2xl font-bold text-blue-500">${p.inheritedCount}</div>
-                <div class="text-xs text-slate-400">inherited</div>
-              </div>
+                <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-2">Inherited Instincts (${p.inheritedInstincts.length})</div>
+                <div class="flex flex-wrap gap-1">${p.inheritedInstincts.map(i => `<span class="tag bg-slate-100 text-slate-500">${escapeHTML(i)}</span>`).join('')}</div>
+              </div>` : ''}
+
+              ${p.recentObs.length > 0 ? `
               <div>
-                <div class="text-2xl font-bold text-green-600">${p.observationCount}</div>
-                <div class="text-xs text-slate-400">observations</div>
-              </div>
+                <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1">Recent Activity</div>
+                <div class="flex gap-1 flex-wrap">${p.recentObs.map(t => `<span class="tag bg-amber-50 text-amber-600">${escapeHTML(t)}</span>`).join('')}</div>
+              </div>` : ''}
             </div>
           </div>
         </div>`).join('')}
@@ -945,6 +1109,7 @@ function collectAllData() {
     skills: collectSkills(),
     hooks: collectHooks(),
     fileStructure: collectFileStructure(),
+    philosophy: collectPhilosophy(),
     memory: collectMemory(),
     projects: collectProjects(),
     stats: collectStats(),
