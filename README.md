@@ -111,12 +111,6 @@ All data is embedded directly into a self-contained HTML file. No server require
 
 ---
 
-## Part Of
-
-Lives in `~/Documents/Development/tools/` alongside [everything-claude-code](https://github.com/affaan-m/everything-claude-code).
-
----
-
 ## License
 
 MIT — see [LICENSE](./LICENSE)
